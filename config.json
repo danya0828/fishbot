@@ -1,0 +1,11 @@
+{
+  "ws": "ws://127.0.0.1:3001",
+  "token": "",
+  "selfId": 0,
+  "apiKey": "在这里填你的 DeepSeek API Key",
+  "baseUrl": "https://api.deepseek.com",
+  "model": "deepseek-chat",
+  "wakeWords": ["小鲸鱼", "肥鱼", "D指导", "鱼哥"],
+  "replyToPrivate": true,
+  "replyToGroup": "wake"
+}
