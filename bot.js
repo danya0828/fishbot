@@ -92,14 +92,26 @@ async function handleMessage(msg) {
   const at = mentioned(segs);
   const hitWord = cfg.wakeWords.some(w => text.includes(w));
 
-  if (isGroup && cfg.replyToGroup === 'wake' && !at && !hitWord) return;
-  if (!isGroup && !cfg.replyToPrivate) return;
+  // 群白名单：配了就只在这些群活动
+  if (isGroup && Array.isArray(cfg.allowedGroups) && cfg.allowedGroups.length > 0
+      && !cfg.allowedGroups.includes(msg.group_id)) return;
+  // 黑名单用户：这些人的消息永远不回
+  if (Array.isArray(cfg.blockedUsers) && cfg.blockedUsers.includes(msg.user_id)) return;
+
+  if (isGroup) {
+    const chime = Math.random() < (cfg.chimeChance ?? 0);
+    const mustReply = at || hitWord;
+    const mode = cfg.replyToGroup ?? 'wake';
+    if (mode === 'wake' && !mustReply && !chime) return;
+    if (mode === 'all' && !mustReply && !chime) return; // all 也只是多给点插话机会，靠 chimeChance 控制
+  } else if (!cfg.replyToPrivate) return;
   if (!text && !at) return;
 
   const key = isGroup ? `g${msg.group_id}` : `p${msg.user_id}`;
   const hist = history.get(key) ?? [];
   const nickname = msg.sender?.card || msg.sender?.nickname || String(msg.user_id);
-  hist.push({ role: 'user', content: `${nickname}：${text || '（@了你，没说话）'}` });
+  const content = text || '（@了你，没说话）';
+  hist.push({ role: 'user', content: `${nickname}：${content}` });
   while (hist.length > MAX_HISTORY) hist.shift();
 
   let reply;
