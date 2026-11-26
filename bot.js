@@ -11,7 +11,13 @@ if (!cfg.apiKey || cfg.apiKey.startsWith('在这里')) {
   process.exit(1);
 }
 
+const MEM_PATH = path.join(dir, 'memory.json');
+let mem = { groups: {}, users: {} };
+try { mem = JSON.parse(fs.readFileSync(MEM_PATH, 'utf8')); } catch { /* 首次运行 */ }
+function saveMem() { try { fs.writeFileSync(MEM_PATH, JSON.stringify(mem, null, 2)); } catch (e) { console.log('记忆写入失败', e.message); } }
+
 const history = new Map();
+const counters = new Map();
 const MAX_HISTORY = 12;
 let selfId = String(cfg.selfId || '');
 let ws;
@@ -54,12 +60,36 @@ function send(action, params) {
   if (ws?.readyState === 1) ws.send(JSON.stringify({ action, params, echo: String(++seq) }));
 }
 
+function memoryBlock(key) {
+  const g = mem.groups[key];
+  if (!g) return '';
+  const lines = [];
+  if (g.facts?.length) lines.push('记住的事：' + g.facts.slice(-8).join('；'));
+  if (g.summary?.length) lines.push('之前聊过：' + g.summary.slice(-3).join(' / '));
+  return lines.length ? '\n\n【本群记忆】\n' + lines.join('\n') : '';
+}
+
+async function summarize(key, msgs) {
+  try {
+    const text = msgs.map(m => m.content).join('\n').slice(-1800);
+    const out = await ask([
+      { role: 'system', content: '把下面这段群聊压成三句话以内的摘要，只写事实和关系变化，不要评论。' },
+      { role: 'user', content: text },
+    ]);
+    if (!out) return;
+    const g = mem.groups[key] ?? { summary: [], facts: [] };
+    g.summary = [...(g.summary ?? []), out.replace(/\s*\n+\s*/g, ' ').slice(0, 120)].slice(-6);
+    mem.groups[key] = g;
+    saveMem();
+  } catch (e) { console.log('摘要失败', e.message); }
+}
+
 async function ask(messages) {
   const res = await fetch(`${cfg.baseUrl}/chat/completions`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${cfg.apiKey}` },
     body: JSON.stringify({
-      model: cfg.model, messages, temperature: 0.9, max_tokens: 120,
+      model: cfg.model, messages, temperature: 0.75, max_tokens: 120,
       stop: ['\n', '\n\n'],
     }),
   });
@@ -116,7 +146,7 @@ async function handleMessage(msg) {
 
   let reply;
   try {
-    reply = await ask([{ role: 'system', content: persona }, ...hist]);
+    reply = await ask([{ role: 'system', content: persona + memoryBlock(key) }, ...hist]);
   } catch (e) {
     console.log('模型调用失败', e.message);
     return;
@@ -125,6 +155,10 @@ async function handleMessage(msg) {
 
   hist.push({ role: 'assistant', content: reply });
   history.set(key, hist);
+
+  const n = (counters.get(key) ?? 0) + 1;
+  counters.set(key, n);
+  if (n % 25 === 0) void summarize(key, hist.slice(-25));
 
   const flat = sanitize(reply);
   if (isGroup) {
