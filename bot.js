@@ -11,44 +11,47 @@ if (!cfg.apiKey || cfg.apiKey.startsWith('在这里')) {
   process.exit(1);
 }
 
-const history = new Map(); // key -> [{role, content}]
+const history = new Map();
 const MAX_HISTORY = 12;
-
-function textOf(segments) {
-  if (typeof segments === 'string') return segments;
-  return segments.filter(s => s.type === 'text').map(s => s.data.text).join('');
-}
-
-function atMe(segments, selfId) {
-  if (!Array.isArray(segments)) return false;
-  return segments.some(s => s.type === 'at' && String(s.data.qq) === String(selfId));
-}
-
-function stripAt(segments) {
-  if (typeof segments === 'string') return segments.trim();
-  return segments.map(s => s.type === 'text' ? s.data.text : '').join('').trim();
-}
-
+let selfId = String(cfg.selfId || '');
 let ws;
-let seq = 0;
 
-function connect() {
-  console.log('连接', cfg.ws);
-  ws = new WebSocket(cfg.ws, cfg.token ? { headers: { Authorization: `Bearer ${cfg.token}` } } : undefined);
-
-  ws.onopen = () => console.log('已连上 OneBot');
-  ws.onclose = () => { console.log('断开，5 秒后重连'); setTimeout(connect, 5000); };
-  ws.onerror = (e) => console.log('连接错误', e.message ?? '');
-  ws.onmessage = (ev) => {
-    let data;
-    try { data = JSON.parse(ev.data); } catch { return; }
-    if (data.post_type === 'message') handleMessage(data).catch(e => console.log('处理失败', e.message));
-  };
+function segsOf(msg) {
+  // 兼容 array 与 CQ 码字符串两种上报格式
+  if (Array.isArray(msg)) return msg;
+  if (typeof msg === 'string') {
+    const out = [];
+    const re = /\[CQ:([a-z_]+)((?:,[^\]]*)?)\]/g;
+    let last = 0, m;
+    while ((m = re.exec(msg))) {
+      if (m.index > last) out.push({ type: 'text', data: { text: msg.slice(last, m.index) } });
+      const params = {};
+      for (const kv of (m[2] || '').replace(/^,/, '').split(',')) {
+        const [k, v] = kv.split('=');
+        if (k) params[k] = decodeURIComponent(v ?? '');
+      }
+      out.push({ type: m[1], data: params });
+      last = re.lastIndex;
+    }
+    if (last < msg.length) out.push({ type: 'text', data: { text: msg.slice(last) } });
+    return out;
+  }
+  return [];
 }
 
+function textOnly(segs) {
+  return segs.filter(s => s.type === 'text').map(s => s.data?.text ?? '').join('')
+    .replace(/^\s*@\S+\s*/, '')
+    .trim();
+}
+
+function mentioned(segs) {
+  return segs.some(s => s.type === 'at' && String(s.data?.qq) === selfId);
+}
+
+let seq = 0;
 function send(action, params) {
-  if (!ws || ws.readyState !== 1) return;
-  ws.send(JSON.stringify({ action, params, echo: String(++seq) }));
+  if (ws?.readyState === 1) ws.send(JSON.stringify({ action, params, echo: String(++seq) }));
 }
 
 async function ask(messages) {
@@ -63,23 +66,22 @@ async function ask(messages) {
 }
 
 async function handleMessage(msg) {
-  const selfId = msg.self_id;
-  if (String(msg.user_id) === String(selfId)) return;
+  if (String(msg.user_id) === selfId) return;
 
   const isGroup = msg.message_type === 'group';
-  const text = stripAt(msg.message);
-  if (!text) return;
-
-  const mentioned = atMe(msg.message, selfId);
+  const segs = segsOf(msg.message);
+  const text = textOnly(segs);
+  const at = mentioned(segs);
   const hitWord = cfg.wakeWords.some(w => text.includes(w));
 
-  if (isGroup && cfg.replyToGroup === 'wake' && !mentioned && !hitWord) return;
+  if (isGroup && cfg.replyToGroup === 'wake' && !at && !hitWord) return;
   if (!isGroup && !cfg.replyToPrivate) return;
+  if (!text && !at) return;
 
   const key = isGroup ? `g${msg.group_id}` : `p${msg.user_id}`;
   const hist = history.get(key) ?? [];
   const nickname = msg.sender?.card || msg.sender?.nickname || String(msg.user_id);
-  hist.push({ role: 'user', content: `${nickname}：${text}` });
+  hist.push({ role: 'user', content: `${nickname}：${text || '（@了你，没说话）'}` });
   while (hist.length > MAX_HISTORY) hist.shift();
 
   let reply;
@@ -94,15 +96,39 @@ async function handleMessage(msg) {
   hist.push({ role: 'assistant', content: reply });
   history.set(key, hist);
 
-  // 只发一行：换行压成空格
   const flat = reply.replace(/\s*\n+\s*/g, ' ').trim();
-
   if (isGroup) {
     send('send_group_msg', { group_id: msg.group_id, message: [{ type: 'text', data: { text: flat } }] });
   } else {
     send('send_private_msg', { user_id: msg.user_id, message: [{ type: 'text', data: { text: flat } }] });
   }
   console.log(`→ ${key} ${flat}`);
+}
+
+function connect() {
+  console.log('连接', cfg.ws);
+  ws = new WebSocket(cfg.ws, cfg.token ? { headers: { Authorization: `Bearer ${cfg.token}` } } : undefined);
+
+  ws.onopen = () => {
+    console.log('已连上 OneBot');
+    send('get_login_info', {});
+  };
+  ws.onclose = () => { console.log('断开，5 秒后重连'); setTimeout(connect, 5000); };
+  ws.onerror = (e) => console.log('连接错误', e.message ?? '');
+  ws.onmessage = (ev) => {
+    let data;
+    try { data = JSON.parse(ev.data); } catch { return; }
+
+    // 拿自己的 QQ 号，@ 判定要用
+    if (data.status === 'ok' && data.data?.user_id && !selfId) {
+      selfId = String(data.data.user_id);
+      console.log('我的 QQ 号:', selfId);
+      return;
+    }
+    if (data.post_type === 'message') {
+      handleMessage(data).catch(e => console.log('处理失败', e.message));
+    }
+  };
 }
 
 connect();
