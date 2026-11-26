@@ -58,11 +58,29 @@ async function ask(messages) {
   const res = await fetch(`${cfg.baseUrl}/chat/completions`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${cfg.apiKey}` },
-    body: JSON.stringify({ model: cfg.model, messages, temperature: 1.1, max_tokens: 200 }),
+    body: JSON.stringify({
+      model: cfg.model, messages, temperature: 0.9, max_tokens: 120,
+      stop: ['\n', '\n\n'],
+    }),
   });
   if (!res.ok) throw new Error(`API ${res.status}: ${(await res.text()).slice(0, 200)}`);
   const j = await res.json();
   return (j.choices?.[0]?.message?.content ?? '').trim();
+}
+
+function sanitize(raw) {
+  const lines = raw.split(/\r?\n/).map(x => x.trim()).filter(Boolean);
+  const bad = /^(hmm|ok\b|okay|no\b|fine|weird|too much|keep|final|reply|回复|answer|结论|草稿)[\s:：.。]/i;
+  const isEnglish = /^[A-Za-z0-9 ,.'"!?\-:;()]+$/;
+  const kept = [];
+  for (const line of lines) {
+    if (bad.test(line)) continue;
+    if (isEnglish.test(line)) continue;
+    if (kept.includes(line)) continue;
+    kept.push(line);
+  }
+  const first = (kept[0] ?? lines[0] ?? '').replace(/\s+/g, ' ').trim();
+  return first;
 }
 
 async function handleMessage(msg) {
@@ -96,7 +114,7 @@ async function handleMessage(msg) {
   hist.push({ role: 'assistant', content: reply });
   history.set(key, hist);
 
-  const flat = reply.replace(/\s*\n+\s*/g, ' ').trim();
+  const flat = sanitize(reply);
   if (isGroup) {
     send('send_group_msg', { group_id: msg.group_id, message: [{ type: 'text', data: { text: flat } }] });
   } else {
